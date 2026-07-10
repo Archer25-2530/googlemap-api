@@ -66,3 +66,58 @@ def fetch_directions(
     if not routes:
         raise MapsClientError(f"No route found between {origin!r} and {destination!r}")
     return routes[0]
+
+
+def geocode(address: str) -> dict:
+    """Look up the first geocoding match for a free-form address."""
+    client = get_client()
+    try:
+        results = client.geocode(address)
+    except googlemaps.exceptions.ApiError as exc:
+        raise MapsClientError(f"Google Geocoding API error: {exc}") from exc
+    except googlemaps.exceptions.TransportError as exc:
+        raise MapsClientError(f"Failed to reach Google Geocoding API: {exc}") from exc
+
+    if not results:
+        raise MapsClientError(f"Address not found: {address!r}")
+    return results[0]
+
+
+def places_nearby(location: dict, keyword: str, place_type: str, radius: int = 5000) -> list[dict]:
+    """Search for open places of a given type/keyword near a lat/lng."""
+    client = get_client()
+    try:
+        response = client.places_nearby(
+            location=location,
+            radius=radius,
+            keyword=keyword,
+            type=place_type,
+            open_now=True,
+        )
+    except googlemaps.exceptions.ApiError as exc:
+        raise MapsClientError(f"Google Places API error: {exc}") from exc
+    except googlemaps.exceptions.TransportError as exc:
+        raise MapsClientError(f"Failed to reach Google Places API: {exc}") from exc
+
+    return response.get("results", [])
+
+
+def distance_matrix(
+    origins: list[str],
+    destinations: list[str],
+    departure_time: dt.datetime,
+) -> dict:
+    """Call the Distance Matrix API for a grid of origins x destinations."""
+    client = get_client()
+    try:
+        return client.distance_matrix(
+            origins=origins,
+            destinations=destinations,
+            mode="driving",
+            departure_time=departure_time,
+            traffic_model="best_guess",
+        )
+    except googlemaps.exceptions.ApiError as exc:
+        raise MapsClientError(f"Google Distance Matrix API error: {exc}") from exc
+    except googlemaps.exceptions.TransportError as exc:
+        raise MapsClientError(f"Failed to reach Google Distance Matrix API: {exc}") from exc

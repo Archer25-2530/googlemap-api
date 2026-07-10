@@ -68,3 +68,80 @@ def compute_route_eta(waypoints: list[str], departure_time: str = "now") -> dict
         "legs": legs,
         "traffic_adjusted": traffic_adjusted,
     }
+
+
+@ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
+def compute_geocode(address: str) -> dict:
+    result = gc.geocode(address)
+    location = result["geometry"]["location"]
+
+    return {
+        "input": address,
+        "formatted": result["formatted_address"],
+        "lat": location["lat"],
+        "lng": location["lng"],
+        "place_id": result["place_id"],
+    }
+
+
+@ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
+def compute_places(
+    origin: str, destination: str, keyword: str, place_type: str = "restaurant"
+) -> dict:
+    departure = gc.resolve_departure_time("now")
+    route = gc.fetch_directions(origin, destination, departure_time=departure)
+    start_location = route["legs"][0]["start_location"]
+    raw_places = gc.places_nearby(start_location, keyword, place_type)
+
+    places = []
+    for place in raw_places[:3]:
+        place_location = place["geometry"]["location"]
+        detour_route = gc.fetch_directions(
+            origin,
+            f"{place_location['lat']},{place_location['lng']}",
+            departure_time=departure,
+        )
+        detour_leg = detour_route["legs"][0]
+        places.append(
+            {
+                "name": place["name"],
+                "address": place.get("vicinity"),
+                "rating": place.get("rating"),
+                "open_now": place.get("opening_hours", {}).get("open_now"),
+                "detour_minutes": format_duration(detour_leg["duration"]["value"]),
+                "place_id": place["place_id"],
+            }
+        )
+
+    return {
+        "origin": origin,
+        "destination": destination,
+        "keyword": keyword,
+        "type": place_type,
+        "places": places,
+    }
+
+
+@ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
+def compute_distance_matrix(
+    origins: list[str], destinations: list[str], departure_time: str = "now"
+) -> dict:
+    departure = gc.resolve_departure_time(departure_time)
+    result = gc.distance_matrix(origins, destinations, departure)
+
+    matrix = []
+    for i, origin in enumerate(origins):
+        row = {"origin": origin, "destinations": []}
+        for j, destination in enumerate(destinations):
+            element = result["rows"][i]["elements"][j]
+            row["destinations"].append(
+                {
+                    "destination": destination,
+                    "duration": format_duration(element["duration"]["value"]),
+                    "duration_seconds": element["duration"]["value"],
+                    "distance": format_distance(element["distance"]["value"]),
+                }
+            )
+        matrix.append(row)
+
+    return {"matrix": matrix, "traffic_adjusted": True}
