@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - TINYNATURE_API_KEY=${TINYNATURE_API_KEY}
       - PORT=${PORT:-3000}
       - TZ=${TZ:-UTC}
     ports:
