@@ -1,0 +1,2 @@
+fastmcp>=2.3.0
+googlemaps>=4.10.0

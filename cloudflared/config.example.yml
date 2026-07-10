@@ -1,0 +1,10 @@
+# Template only. Copy the real tunnel ID, credentials file, and Zero Trust
+# Access policy from your existing ha-mcp / fs-mcp / pihole-mcp tunnel config
+# on the Proxmox host — this file just shows the ingress rule to add.
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: maps-mcp.drewhobick.com
+    service: http://localhost:3000
+  - service: http_status:404
