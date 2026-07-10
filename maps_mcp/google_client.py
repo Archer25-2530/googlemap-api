@@ -68,19 +68,22 @@ def fetch_directions(
     return routes[0]
 
 
-def geocode(address: str) -> dict:
-    """Look up the first geocoding match for a free-form address."""
+def validate_address(address: str) -> dict:
+    """Validate/normalize a free-form address via the Address Validation API."""
     client = get_client()
     try:
-        results = client.geocode(address)
+        response = client.addressvalidation([address], enableUspsCass=False)
     except googlemaps.exceptions.ApiError as exc:
-        raise MapsClientError(f"Google Geocoding API error: {exc}") from exc
+        raise MapsClientError(f"Google Address Validation API error: {exc}") from exc
     except googlemaps.exceptions.TransportError as exc:
-        raise MapsClientError(f"Failed to reach Google Geocoding API: {exc}") from exc
+        raise MapsClientError(
+            f"Failed to reach Google Address Validation API: {exc}"
+        ) from exc
 
-    if not results:
+    result = response.get("result")
+    if not result:
         raise MapsClientError(f"Address not found: {address!r}")
-    return results[0]
+    return result
 
 
 def places_nearby(location: dict, keyword: str, place_type: str, radius: int = 5000) -> list[dict]:

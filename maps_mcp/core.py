@@ -72,15 +72,20 @@ def compute_route_eta(waypoints: list[str], departure_time: str = "now") -> dict
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
 def compute_geocode(address: str) -> dict:
-    result = gc.geocode(address)
-    location = result["geometry"]["location"]
+    result = gc.validate_address(address)
+    verdict = result.get("verdict", {})
+    address_info = result.get("address", {})
+    geocode_info = result.get("geocode", {})
+    location = geocode_info.get("location", {})
 
     return {
         "input": address,
-        "formatted": result["formatted_address"],
-        "lat": location["lat"],
-        "lng": location["lng"],
-        "place_id": result["place_id"],
+        "formatted": address_info.get("formattedAddress"),
+        "lat": location.get("latitude"),
+        "lng": location.get("longitude"),
+        "place_id": geocode_info.get("placeId"),
+        "complete": verdict.get("addressComplete", False),
+        "unconfirmed_components": address_info.get("unconfirmedComponentTypes", []),
     }
 
 
