@@ -3,6 +3,9 @@ services:
     build: .
     container_name: maps-mcp
     restart: unless-stopped
-    env_file: .env
+    environment:
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - PORT=${PORT:-3000}
+      - TZ=${TZ:-UTC}
     ports:
       - "3000:3000"
