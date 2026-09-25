@@ -133,6 +133,36 @@ def compute_places(
 
 _NEARBY_KIND_TO_TYPE = {"food": "restaurant", "gas": "gas_station"}
 NEARBY_MAX_RESULTS_CAP = 8
+_ROUTE_SAMPLE_POINTS = 3
+
+
+def _point_after(steps: list[dict], target_seconds: float) -> tuple[dict, float]:
+    """Walk a route's steps and return the lat/lng reached at or after
+    target_seconds of cumulative driving time, plus the actual elapsed seconds.
+    """
+    elapsed = 0
+    for step in steps:
+        elapsed += step["duration"]["value"]
+        if elapsed >= target_seconds:
+            return step["end_location"], elapsed
+    return steps[-1]["end_location"], elapsed
+
+
+def _sample_points_along_route(steps: list[dict], within_minutes: int) -> list[dict]:
+    """Pick up to _ROUTE_SAMPLE_POINTS evenly-spaced points reached within the
+    first `within_minutes` of driving, deduplicated by location.
+    """
+    total_seconds = within_minutes * 60
+    points = []
+    seen = set()
+    for i in range(1, _ROUTE_SAMPLE_POINTS + 1):
+        location, elapsed = _point_after(steps, total_seconds * i / _ROUTE_SAMPLE_POINTS)
+        key = (round(location["lat"], 4), round(location["lng"], 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        points.append({"location": location, "minutes_into_drive": elapsed / 60})
+    return points
 
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
@@ -142,11 +172,19 @@ def compute_nearby_places(
     destination: str | None = None,
     keyword: str | None = None,
     max_results: int = 5,
+    within_first_minutes: int | None = None,
 ) -> dict:
     if kind not in _NEARBY_KIND_TO_TYPE:
         raise ValueError("kind must be 'food' or 'gas'")
+    if within_first_minutes is not None and not destination:
+        raise ValueError("within_first_minutes requires destination")
     place_type = _NEARBY_KIND_TO_TYPE[kind]
     limit = max(1, min(max_results, NEARBY_MAX_RESULTS_CAP))
+
+    if within_first_minutes:
+        return _compute_nearby_along_route(
+            origin, destination, keyword, place_type, limit, within_first_minutes
+        )
 
     if destination:
         result = compute_places(origin, destination, keyword, place_type, max_results=limit)
@@ -184,6 +222,60 @@ def compute_nearby_places(
     scored.sort(key=lambda item: item[0])
 
     return {"places": [place for _, place in scored]}
+
+
+def _compute_nearby_along_route(
+    origin: str,
+    destination: str,
+    keyword: str | None,
+    place_type: str,
+    limit: int,
+    within_first_minutes: int,
+) -> dict:
+    """Search near points sampled along the route, truncated to the first
+    within_first_minutes of driving, so results are actually on the way
+    rather than just near the origin or ranked by detour off the full route.
+    """
+    departure = gc.resolve_departure_time("now")
+    route = gc.fetch_directions(origin, destination, departure_time=departure)
+    steps = route["legs"][0]["steps"]
+    sample_points = _sample_points_along_route(steps, within_first_minutes)
+
+    seen_place_ids = set()
+    candidates = []
+    for sample in sample_points:
+        for place in gc.places_nearby(sample["location"], keyword, place_type):
+            if place["place_id"] in seen_place_ids:
+                continue
+            seen_place_ids.add(place["place_id"])
+            candidates.append(place)
+
+    scored = []
+    for place in candidates[: limit * 3]:
+        place_location = place["geometry"]["location"]
+        leg = gc.fetch_directions(
+            origin,
+            f"{place_location['lat']},{place_location['lng']}",
+            departure_time=departure,
+        )["legs"][0]
+        duration_seconds = leg["duration"]["value"]
+        scored.append(
+            (
+                duration_seconds,
+                {
+                    "name": place["name"],
+                    "address": place.get("vicinity"),
+                    "rating": place.get("rating"),
+                    "open_now": place.get("opening_hours", {}).get("open_now"),
+                    "detour_minutes": format_duration(duration_seconds),
+                    "minutes_into_drive": format_duration(duration_seconds),
+                    "place_id": place["place_id"],
+                },
+            )
+        )
+    scored.sort(key=lambda item: item[0])
+
+    return {"places": [place for _, place in scored[:limit]]}
 
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)

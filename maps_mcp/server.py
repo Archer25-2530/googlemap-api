@@ -63,6 +63,7 @@ def get_nearby_places(
     destination: str | None = None,
     keyword: str | None = None,
     max_results: int = 5,
+    within_first_minutes: int | None = None,
 ) -> dict:
     """Find nearby food or gas stops, optionally ranked by detour off a route.
 
@@ -74,8 +75,11 @@ def get_nearby_places(
         destination: Optional address; if given, results are ranked by detour off this route.
         keyword: Optional brand filter, e.g. "Chick-fil-A", "Wawa", "Chipotle".
         max_results: Number of results to return (default 5, max 8).
+        within_first_minutes: Optional; requires destination. Restricts the search to stops
+            reachable within this many minutes of driving from origin, e.g. 60 for a
+            breakfast stop on a longer trip.
     """
-    return compute_nearby_places(kind, origin, destination, keyword, max_results)
+    return compute_nearby_places(kind, origin, destination, keyword, max_results, within_first_minutes)
 
 
 # GET-only HTTP endpoints below, for clients that can't do OAuth/MCP (e.g.
