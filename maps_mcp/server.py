@@ -9,6 +9,7 @@ from .core import (
     compute_distance_matrix,
     compute_drive_time,
     compute_geocode,
+    compute_nearby_places,
     compute_places,
     compute_route_eta,
 )
@@ -53,6 +54,28 @@ def get_route_eta(waypoints: list[str], departure_time: str = "now") -> dict:
         departure_time: "now" (default) or an ISO 8601 timestamp for a future departure.
     """
     return compute_route_eta(waypoints, departure_time)
+
+
+@mcp.tool
+def get_nearby_places(
+    kind: str,
+    origin: str,
+    destination: str | None = None,
+    keyword: str | None = None,
+    max_results: int = 5,
+) -> dict:
+    """Find nearby food or gas stops, optionally ranked by detour off a route.
+
+    Use for breakfast/lunch/fuel on work trips.
+
+    Args:
+        kind: "food" or "gas".
+        origin: Address or "lat,lng" to search near.
+        destination: Optional address; if given, results are ranked by detour off this route.
+        keyword: Optional brand filter, e.g. "Chick-fil-A", "Wawa", "Chipotle".
+        max_results: Number of results to return (default 5, max 8).
+    """
+    return compute_nearby_places(kind, origin, destination, keyword, max_results)
 
 
 # GET-only HTTP endpoints below, for clients that can't do OAuth/MCP (e.g.

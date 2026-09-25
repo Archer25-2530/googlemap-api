@@ -91,7 +91,11 @@ def compute_geocode(address: str) -> dict:
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
 def compute_places(
-    origin: str, destination: str, keyword: str, place_type: str = "restaurant"
+    origin: str,
+    destination: str,
+    keyword: str,
+    place_type: str = "restaurant",
+    max_results: int = 3,
 ) -> dict:
     departure = gc.resolve_departure_time("now")
     route = gc.fetch_directions(origin, destination, departure_time=departure)
@@ -99,7 +103,7 @@ def compute_places(
     raw_places = gc.places_nearby(start_location, keyword, place_type)
 
     places = []
-    for place in raw_places[:3]:
+    for place in raw_places[:max_results]:
         place_location = place["geometry"]["location"]
         detour_route = gc.fetch_directions(
             origin,
@@ -125,6 +129,61 @@ def compute_places(
         "type": place_type,
         "places": places,
     }
+
+
+_NEARBY_KIND_TO_TYPE = {"food": "restaurant", "gas": "gas_station"}
+NEARBY_MAX_RESULTS_CAP = 8
+
+
+@ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
+def compute_nearby_places(
+    kind: str,
+    origin: str,
+    destination: str | None = None,
+    keyword: str | None = None,
+    max_results: int = 5,
+) -> dict:
+    if kind not in _NEARBY_KIND_TO_TYPE:
+        raise ValueError("kind must be 'food' or 'gas'")
+    place_type = _NEARBY_KIND_TO_TYPE[kind]
+    limit = max(1, min(max_results, NEARBY_MAX_RESULTS_CAP))
+
+    if destination:
+        result = compute_places(origin, destination, keyword, place_type, max_results=limit)
+        return {"places": result["places"]}
+
+    departure = gc.resolve_departure_time("now")
+    origin_result = gc.validate_address(origin)
+    origin_location = origin_result.get("geocode", {}).get("location", {})
+    start_location = {
+        "lat": origin_location.get("latitude"),
+        "lng": origin_location.get("longitude"),
+    }
+    raw_places = gc.places_nearby(start_location, keyword, place_type)
+
+    scored = []
+    for place in raw_places[:limit]:
+        place_location = place["geometry"]["location"]
+        leg = gc.fetch_directions(
+            origin,
+            f"{place_location['lat']},{place_location['lng']}",
+            departure_time=departure,
+        )["legs"][0]
+        scored.append(
+            (
+                leg["distance"]["value"],
+                {
+                    "name": place["name"],
+                    "address": place.get("vicinity"),
+                    "rating": place.get("rating"),
+                    "open_now": place.get("opening_hours", {}).get("open_now"),
+                    "place_id": place["place_id"],
+                },
+            )
+        )
+    scored.sort(key=lambda item: item[0])
+
+    return {"places": [place for _, place in scored]}
 
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
