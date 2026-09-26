@@ -56,5 +56,5 @@ Google Cloud has no hard "never charge me" switch — budgets only alert. Follow
 | `GET https://maps-mcp.drewhobick.com/api/geocode` | `key=` query param | ✅ |
 
 Repos:
-- `Archer25-2530/googlemap-api` (server, branch `claude/google-maps-mcp-container-d2tgwy` is what's deployed — `main` is just a stub, don't deploy from it)
+- `Archer25-2530/googlemap-api` (server). **Update (2026-09-26, see `session-2026-09-26.md`): `main` is now the real deployed branch** — the work branch was merged in and the stack repointed at `main`. The line above is stale, kept for history only.
 - `Archer25-2530/maps-mcp-oauth-worker` (Cloudflare Worker, `main`)
