@@ -15,6 +15,7 @@ from .core import (
 )
 from .google_client import MapsClientError
 from .mcp_app import mcp
+from .weather import WeatherError, compute_weather
 
 
 def _authorized(request: Request) -> bool:
@@ -80,6 +81,32 @@ def get_nearby_places(
             breakfast stop on a longer trip.
     """
     return compute_nearby_places(kind, origin, destination, keyword, max_results, within_first_minutes)
+
+
+@mcp.tool
+def get_weather(
+    location: str,
+    start_date: str,
+    end_date: str | None = None,
+    hourly_at: str | None = None,
+) -> dict:
+    """Get a daily weather forecast for a location and date range.
+
+    Days within Google's 10-day forecast window use real forecasts; days
+    beyond that use a 10-year historical average, marked "typical" in the
+    output. Never fills in numbers on failure — check for an "error" key.
+
+    Args:
+        location: Free-text address/city, or "lat,lng".
+        start_date: First day to forecast, "YYYY-MM-DD" local to the location.
+        end_date: Last day to forecast, "YYYY-MM-DD" (default: start_date). Max 21-day span.
+        hourly_at: Optional "HH:MM" local time; adds temp_at_hour_f for days within
+            the next 10 days, e.g. a site's morning start time.
+    """
+    try:
+        return compute_weather(location, start_date, end_date, hourly_at)
+    except WeatherError as exc:
+        return {"error": str(exc)}
 
 
 # GET-only HTTP endpoints below, for clients that can't do OAuth/MCP (e.g.
