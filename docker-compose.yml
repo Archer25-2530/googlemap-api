@@ -1,6 +1,7 @@
 services:
   maps-mcp:
     build: .
+    pull_policy: build
     container_name: maps-mcp
     restart: unless-stopped
     environment:
