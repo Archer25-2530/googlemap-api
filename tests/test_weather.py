@@ -274,3 +274,104 @@ def test_google_weather_request_maps_403_to_api_not_enabled(monkeypatch):
     monkeypatch.setattr(weather.requests, "get", lambda url, params=None, timeout=None: FakeResponse())
     with pytest.raises(weather.WeatherError, match="weather_api_not_enabled"):
         weather._google_weather_request("https://example.invalid", {})
+
+
+def _multi_day_setup(monkeypatch, n_days):
+    today = weather._today_utc()
+    fixed_now = dt.datetime.combine(today, dt.time(5, 0), tzinfo=dt.timezone.utc)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(weather.dt, "datetime", FixedDateTime)
+    dates = [today + dt.timedelta(days=i) for i in range(n_days)]
+
+    def fake_daily(lat, lng):
+        return {
+            "timeZone": {"id": "UTC"},
+            "forecastDays": [
+                {
+                    "displayDate": {"year": d.year, "month": d.month, "day": d.day},
+                    "maxTemperature": {"degrees": 70},
+                    "minTemperature": {"degrees": 46},
+                    "daytimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                    "nighttimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                }
+                for d in dates
+            ],
+        }
+
+    def fake_hourly(lat, lng, hours):
+        start = fixed_now
+        return {
+            "forecastHours": [
+                {
+                    "interval": {"startTime": (start + dt.timedelta(hours=h)).isoformat()},
+                    "temperature": {"degrees": 50},
+                }
+                for h in range(hours)
+            ]
+        }
+
+    monkeypatch.setattr(weather, "_fetch_daily_forecast", fake_daily)
+    monkeypatch.setattr(weather, "_fetch_hourly_forecast", fake_hourly)
+    monkeypatch.setattr(weather, "_resolve_location", lambda location: (39.17, -86.53, location))
+    return dates
+
+
+def test_hourly_at_uses_open_meteo_beyond_24_hours(monkeypatch):
+    dates = _multi_day_setup(monkeypatch, 4)
+    calls = []
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+
+        def __init__(self, params):
+            self.params = params
+
+        def json(self):
+            times, temps = [], []
+            d = dt.date.fromisoformat(self.params["start_date"])
+            end = dt.date.fromisoformat(self.params["end_date"])
+            while d <= end:
+                for h in range(24):
+                    times.append(f"{d.isoformat()}T{h:02d}:00")
+                    temps.append(60.4 if h == 9 else 40.0)
+                d += dt.timedelta(days=1)
+            return {"hourly": {"time": times, "temperature_2m": temps}}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(params)
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+    result = weather.compute_weather(
+        "Indianapolis, IN", dates[0].isoformat(), dates[-1].isoformat(), hourly_at="09:00"
+    )
+    assert calls == [weather.OPEN_METEO_FORECAST_URL]  # exactly one free call
+    by_date = {d["date"]: d for d in result["days"]}
+    first = by_date[dates[0].isoformat()]
+    assert first["temp_at_hour_f"] == 50 and first["temp_at_hour_source"] == "google"
+    for d in dates[1:]:
+        day = by_date[d.isoformat()]
+        assert day["temp_at_hour_f"] == 60
+        assert day["temp_at_hour_source"] == "open-meteo"
+
+
+def test_open_meteo_failure_keeps_daily_forecast(monkeypatch):
+    dates = _multi_day_setup(monkeypatch, 3)
+
+    class FailResponse:
+        ok = False
+        status_code = 500
+
+    monkeypatch.setattr(weather.requests, "get", lambda url, params=None, timeout=None: FailResponse())
+    result = weather.compute_weather(
+        "Indianapolis, IN", dates[0].isoformat(), dates[-1].isoformat(), hourly_at="09:00"
+    )
+    assert len(result["days"]) == 3
+    assert result["days"][0]["temp_at_hour_f"] == 50
+    assert "temp_at_hour_f" not in result["days"][2]
