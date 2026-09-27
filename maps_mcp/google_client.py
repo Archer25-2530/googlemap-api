@@ -86,8 +86,15 @@ def validate_address(address: str) -> dict:
     return result
 
 
-def places_nearby(location: dict, keyword: str, place_type: str, radius: int = 5000) -> list[dict]:
-    """Search for open places of a given type/keyword near a lat/lng."""
+def places_nearby(
+    location: dict,
+    keyword: str,
+    place_type: str,
+    radius: int = 5000,
+    open_now: bool = True,
+) -> list[dict]:
+    """Search for places of a given type/keyword near a lat/lng, by default
+    only those open right now."""
     client = get_client()
     try:
         response = client.places_nearby(
@@ -95,7 +102,7 @@ def places_nearby(location: dict, keyword: str, place_type: str, radius: int = 5
             radius=radius,
             keyword=keyword,
             type=place_type,
-            open_now=True,
+            open_now=open_now,
         )
     except googlemaps.exceptions.ApiError as exc:
         raise MapsClientError(f"Google Places API error: {exc}") from exc
@@ -103,6 +110,21 @@ def places_nearby(location: dict, keyword: str, place_type: str, radius: int = 5
         raise MapsClientError(f"Failed to reach Google Places API: {exc}") from exc
 
     return response.get("results", [])
+
+
+def place_hours(place_id: str) -> dict:
+    """Fetch a place's opening hours and UTC offset via Place Details."""
+    client = get_client()
+    try:
+        response = client.place(
+            place_id, fields=["current_opening_hours", "opening_hours", "utc_offset"]
+        )
+    except googlemaps.exceptions.ApiError as exc:
+        raise MapsClientError(f"Google Place Details API error: {exc}") from exc
+    except googlemaps.exceptions.TransportError as exc:
+        raise MapsClientError(f"Failed to reach Google Place Details API: {exc}") from exc
+
+    return response.get("result", {})
 
 
 def distance_matrix(

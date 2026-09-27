@@ -65,6 +65,7 @@ def get_nearby_places(
     keyword: str | None = None,
     max_results: int = 5,
     within_first_minutes: int | None = None,
+    departure_time: str = "now",
 ) -> dict:
     """Find nearby food or gas stops, optionally ranked by detour off a route.
 
@@ -79,8 +80,14 @@ def get_nearby_places(
         within_first_minutes: Optional; requires destination. Only returns stops reached
             within this many minutes of driving from origin, e.g. 60 for a breakfast stop
             on a longer trip. detour_minutes is the time the stop adds over the direct route.
+        departure_time: "now" (default) returns places open right now, with open_now.
+            An ISO 8601 timestamp for a planned departure (e.g. "2026-09-28T06:00:00-04:00")
+            instead returns places open when you'd arrive at them, with arrival_time and
+            open_at_arrival (null if Google has no hours for the place).
     """
-    return compute_nearby_places(kind, origin, destination, keyword, max_results, within_first_minutes)
+    return compute_nearby_places(
+        kind, origin, destination, keyword, max_results, within_first_minutes, departure_time
+    )
 
 
 @mcp.tool
@@ -100,8 +107,8 @@ def get_weather(
         location: Free-text address/city, or "lat,lng".
         start_date: First day to forecast, "YYYY-MM-DD" local to the location.
         end_date: Last day to forecast, "YYYY-MM-DD" (default: start_date). Max 21-day span.
-        hourly_at: Optional "HH:MM" local time; adds temp_at_hour_f for days within
-            the next 10 days, e.g. a site's morning start time.
+        hourly_at: Optional "HH:MM" local time; adds temp_at_hour_f when that time is
+            within the next 24 hours, e.g. a site's morning start time.
     """
     try:
         return compute_weather(location, start_date, end_date, hourly_at)
