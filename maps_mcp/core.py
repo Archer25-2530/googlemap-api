@@ -1,7 +1,10 @@
 """Business logic behind the two MCP tools. Kept free of any MCP/transport
 concerns so it can be unit tested and reused by scripts/validate_routes.py.
 """
+import math
 from datetime import timedelta
+
+import googlemaps.convert
 
 from . import google_client as gc
 from .cache import ttl_cache
@@ -99,25 +102,20 @@ def compute_places(
 ) -> dict:
     departure = gc.resolve_departure_time("now")
     route = gc.fetch_directions(origin, destination, departure_time=departure)
+    direct_seconds = route["legs"][0]["duration"]["value"]
     start_location = route["legs"][0]["start_location"]
     raw_places = gc.places_nearby(start_location, keyword, place_type)
 
     places = []
     for place in raw_places[:max_results]:
-        place_location = place["geometry"]["location"]
-        detour_route = gc.fetch_directions(
-            origin,
-            f"{place_location['lat']},{place_location['lng']}",
-            departure_time=departure,
-        )
-        detour_leg = detour_route["legs"][0]
+        _, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
         places.append(
             {
                 "name": place["name"],
                 "address": place.get("vicinity"),
                 "rating": place.get("rating"),
                 "open_now": place.get("opening_hours", {}).get("open_now"),
-                "detour_minutes": format_duration(detour_leg["duration"]["value"]),
+                "detour_minutes": format_duration(detour_seconds),
                 "place_id": place["place_id"],
             }
         )
@@ -136,15 +134,60 @@ NEARBY_MAX_RESULTS_CAP = 8
 _ROUTE_SAMPLE_POINTS = 3
 
 
-def _point_after(steps: list[dict], target_seconds: float) -> tuple[dict, float]:
-    """Walk a route's steps and return the lat/lng reached at or after
-    target_seconds of cumulative driving time, plus the actual elapsed seconds.
+def _stop_timing(
+    origin: str, destination: str, place: dict, departure, direct_seconds: int
+) -> tuple[int, int]:
+    """Route origin -> place -> destination and return (seconds from origin to
+    the place, extra seconds the stop adds over the direct route).
+
+    Both sides use plain `duration`: Google omits duration_in_traffic on
+    routes with stopover waypoints, so mixing the two would skew the detour.
+    """
+    place_location = place["geometry"]["location"]
+    legs = gc.fetch_directions(
+        origin,
+        destination,
+        departure_time=departure,
+        waypoints=[f"{place_location['lat']},{place_location['lng']}"],
+    )["legs"]
+    to_stop = legs[0]["duration"]["value"]
+    via_total = sum(leg["duration"]["value"] for leg in legs)
+    return to_stop, max(0, via_total - direct_seconds)
+
+
+def _interpolate(points: list[dict], fraction: float) -> dict:
+    """Return the lat/lng `fraction` of the way along a polyline's length."""
+    if len(points) == 1:
+        return points[0]
+    segments = [math.dist((a["lat"], a["lng"]), (b["lat"], b["lng"])) for a, b in zip(points, points[1:])]
+    remaining = sum(segments) * fraction
+    for (a, b), length in zip(zip(points, points[1:]), segments):
+        if remaining <= length and length > 0:
+            t = remaining / length
+            return {"lat": a["lat"] + (b["lat"] - a["lat"]) * t, "lng": a["lng"] + (b["lng"] - a["lng"]) * t}
+        remaining -= length
+    return points[-1]
+
+
+def _point_at(steps: list[dict], target_seconds: float) -> tuple[dict, float]:
+    """Return the lat/lng reached after target_seconds of driving, plus the
+    elapsed seconds at that point (capped at the route's total).
+
+    Interpolates within the step that crosses target_seconds (along its
+    polyline when present) rather than jumping to the step's end, which on a
+    long highway step can land far past the requested window.
     """
     elapsed = 0
     for step in steps:
-        elapsed += step["duration"]["value"]
-        if elapsed >= target_seconds:
-            return step["end_location"], elapsed
+        step_seconds = step["duration"]["value"]
+        if step_seconds and elapsed + step_seconds >= target_seconds:
+            if "polyline" in step:
+                points = googlemaps.convert.decode_polyline(step["polyline"]["points"])
+            else:
+                points = [step["start_location"], step["end_location"]]
+            fraction = (target_seconds - elapsed) / step_seconds
+            return _interpolate(points, fraction), target_seconds
+        elapsed += step_seconds
     return steps[-1]["end_location"], elapsed
 
 
@@ -156,7 +199,7 @@ def _sample_points_along_route(steps: list[dict], within_minutes: int) -> list[d
     points = []
     seen = set()
     for i in range(1, _ROUTE_SAMPLE_POINTS + 1):
-        location, elapsed = _point_after(steps, total_seconds * i / _ROUTE_SAMPLE_POINTS)
+        location, elapsed = _point_at(steps, total_seconds * i / _ROUTE_SAMPLE_POINTS)
         key = (round(location["lat"], 4), round(location["lng"], 4))
         if key in seen:
             continue
@@ -238,8 +281,9 @@ def _compute_nearby_along_route(
     """
     departure = gc.resolve_departure_time("now")
     route = gc.fetch_directions(origin, destination, departure_time=departure)
-    steps = route["legs"][0]["steps"]
-    sample_points = _sample_points_along_route(steps, within_first_minutes)
+    leg = route["legs"][0]
+    direct_seconds = leg["duration"]["value"]
+    sample_points = _sample_points_along_route(leg["steps"], within_first_minutes)
 
     seen_place_ids = set()
     candidates = []
@@ -250,25 +294,22 @@ def _compute_nearby_along_route(
             seen_place_ids.add(place["place_id"])
             candidates.append(place)
 
+    window_seconds = within_first_minutes * 60
     scored = []
     for place in candidates[: limit * 3]:
-        place_location = place["geometry"]["location"]
-        leg = gc.fetch_directions(
-            origin,
-            f"{place_location['lat']},{place_location['lng']}",
-            departure_time=departure,
-        )["legs"][0]
-        duration_seconds = leg["duration"]["value"]
+        to_stop, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
+        if to_stop > window_seconds:
+            continue
         scored.append(
             (
-                duration_seconds,
+                (detour_seconds, to_stop),
                 {
                     "name": place["name"],
                     "address": place.get("vicinity"),
                     "rating": place.get("rating"),
                     "open_now": place.get("opening_hours", {}).get("open_now"),
-                    "detour_minutes": format_duration(duration_seconds),
-                    "minutes_into_drive": format_duration(duration_seconds),
+                    "detour_minutes": format_duration(detour_seconds),
+                    "minutes_into_drive": format_duration(to_stop),
                     "place_id": place["place_id"],
                 },
             )

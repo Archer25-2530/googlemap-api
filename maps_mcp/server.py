@@ -76,9 +76,9 @@ def get_nearby_places(
         destination: Optional address; if given, results are ranked by detour off this route.
         keyword: Optional brand filter, e.g. "Chick-fil-A", "Wawa", "Chipotle".
         max_results: Number of results to return (default 5, max 8).
-        within_first_minutes: Optional; requires destination. Restricts the search to stops
-            reachable within this many minutes of driving from origin, e.g. 60 for a
-            breakfast stop on a longer trip.
+        within_first_minutes: Optional; requires destination. Only returns stops reached
+            within this many minutes of driving from origin, e.g. 60 for a breakfast stop
+            on a longer trip. detour_minutes is the time the stop adds over the direct route.
     """
     return compute_nearby_places(kind, origin, destination, keyword, max_results, within_first_minutes)
 
