@@ -286,7 +286,6 @@ def _sample_points_along_route(steps: list[dict], within_minutes: int) -> list[d
 # all of these by default, so the answer is "which of my brands is close by
 # or on the way", not "any restaurant Google ranks highly".
 DEFAULT_FOOD_BRANDS = ("Chick-fil-A", "Wawa", "QuikTrip", "Dunkin'")
-_SEARCH_RADIUS_METERS = 5000
 # Past this a stop isn't worth suggesting. Generous on purpose: Drew will
 # sometimes take the Chick-fil-A across town (~18m) anyway.
 MAX_DETOUR_SECONDS = 20 * 60
@@ -325,28 +324,28 @@ def _search_brands(
     points: list[dict], brands: list[str | None], place_type: str, open_now: bool
 ) -> list[tuple[float, str | None, dict]]:
     """Search every brand near every point and return unique
-    (meters from search point, brand, place) candidates, nearest first.
+    (meters from nearest search point, brand, place) candidates, nearest
+    first, so the capped set of detour lookups goes to the likeliest stops.
 
-    Google can return places well outside the requested radius (a Terre
-    Haute QuikTrip for a point near Martinsville), so those are dropped.
+    Google often returns places outside the requested radius. Those aren't
+    dropped here: some are good stops a few miles off the highway, and the
+    detour cap is what rules out the wrong-direction ones (a Terre Haute
+    QuikTrip for a Bloomington -> Indianapolis route).
     """
-    seen_place_ids = set()
-    candidates = []
+    candidates = {}
     for brand in brands:
         for point in points:
             # The brand name is filter enough; a type would drop brands Google
             # files elsewhere (QuikTrip as a gas station, Dunkin' as a cafe).
             search_type = place_type if brand is None else None
             for place in gc.places_nearby(point, brand, search_type, open_now=open_now):
-                if place["place_id"] in seen_place_ids or not _matches_brand(place, brand):
+                if not _matches_brand(place, brand):
                     continue
                 meters = _meters_between(point, place["geometry"]["location"])
-                if meters > _SEARCH_RADIUS_METERS:
-                    continue
-                seen_place_ids.add(place["place_id"])
-                candidates.append((meters, brand, place))
-    candidates.sort(key=lambda item: item[0])
-    return candidates
+                known = candidates.get(place["place_id"])
+                if known is None or meters < known[0]:
+                    candidates[place["place_id"]] = (meters, known[1] if known else brand, place)
+    return sorted(candidates.values(), key=lambda item: item[0])
 
 
 def _place_result(place: dict, brand: str | None) -> dict:

@@ -165,20 +165,21 @@ def test_default_food_search_covers_all_brands_ranked_by_detour(monkeypatch):
     )
 
 
-def test_along_route_drops_far_off_route_wrong_brand_over_cap_and_past_window(monkeypatch):
+def test_along_route_drops_wrong_direction_wrong_brand_and_over_cap(monkeypatch):
     _fake_route(
         monkeypatch,
         {
             NEAR_15M: (15 * 60, 67 * 60),  # 21m detour: over the 20m cap
-            NEAR_45M: (47 * 60, 16 * 60),  # past the 45m window
+            NEAR_45M: (62 * 60, 1 * 60),  # past the 60m window
             NEAR_30M: (25 * 60, 38 * 60),  # 2m detour: kept
+            9.0: (59 * 60, 70 * 60),  # Terre Haute: 1h 8m detour
         },
     )
     _fake_places(
         monkeypatch,
         {
             "QuikTrip": [
-                _place("terre-haute", "QuikTrip", 9.0),  # returned by Google, far from the route
+                _place("terre-haute", "QuikTrip", 9.0),  # returned by Google, wrong direction
                 _place("too-far", "QuikTrip Store #1", NEAR_15M),
                 _place("late", "QuikTrip", NEAR_45M),
                 _place("ok", "QuikTrip Store #2", NEAR_30M),
@@ -188,7 +189,7 @@ def test_along_route_drops_far_off_route_wrong_brand_over_cap_and_past_window(mo
     )
 
     places = core._compute_nearby_along_route(
-        "A", "B", ["QuikTrip", "Dunkin'"], "restaurant", 5, 45
+        "A", "B", ["QuikTrip", "Dunkin'"], "restaurant", 5, 60
     )["places"]
 
     assert [p["place_id"] for p in places] == ["ok"]
