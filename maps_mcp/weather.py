@@ -315,6 +315,11 @@ def compute_weather(
         for d in google_dates:
             if d in forecast_entries:
                 days_by_date[d] = forecast_entries[d]
+            else:
+                # Google's forecast window is anchored to local time, not our
+                # UTC-based cutoff, so a date we expected to be covered can
+                # come back missing. Don't silently drop it.
+                typical_dates.append(d)
 
     if typical_dates:
         days_by_date.update(_fetch_typical_days(lat, lng, typical_dates))
@@ -336,7 +341,10 @@ def compute_weather(
         if hourly_dates:
             last_date = max(hourly_dates)
             target_dt = dt.datetime.fromisoformat(last_date).replace(hour=hour, minute=minute, tzinfo=tz)
-            hours_needed = math.ceil((target_dt.astimezone(dt.timezone.utc) - now).total_seconds() / 3600)
+            # +1: ceil() gives just enough buckets to *reach* the target hour,
+            # not to include it (e.g. now=5:00, target=9:00 is exactly 4
+            # buckets away, but the 9:00 bucket itself is the 5th one).
+            hours_needed = math.ceil((target_dt.astimezone(dt.timezone.utc) - now).total_seconds() / 3600) + 1
             hours_needed = max(1, min(MAX_HOURLY_HOURS, hours_needed))
 
             hourly_response = _fetch_hourly_forecast(lat, lng, hours_needed)
