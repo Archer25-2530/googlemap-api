@@ -62,39 +62,6 @@ def test_sample_points_deduplicates_when_route_shorter_than_window():
     assert points[-1]["location"] == {"lat": 4.0, "lng": 4.0}
 
 
-def _place(place_id, lat):
-    return {"place_id": place_id, "name": place_id, "geometry": {"location": {"lat": lat, "lng": 0}}}
-
-
-def test_along_route_enforces_window_and_reports_real_detour(monkeypatch):
-    direct_seconds = 3660  # 61m direct
-    # (seconds from origin to stop, seconds from stop to destination)
-    timings = {
-        "0.3,0": (25 * 60, 38 * 60),   # Martinsville: 25m in, 2m detour
-        "0.5,0": (35 * 60, 31 * 60),   # Mooresville: 35m in, 5m detour
-        "0.7,0": (47 * 60, 16 * 60),   # Greenwood: past the 45m window
-    }
-
-    def fake_directions(origin, destination, departure_time, waypoints=None):
-        if not waypoints:
-            return {"legs": [{"duration": {"value": direct_seconds}, "steps": STEPS}]}
-        to_stop, from_stop = timings[waypoints[0]]
-        return {"legs": [{"duration": {"value": to_stop}}, {"duration": {"value": from_stop}}]}
-
-    monkeypatch.setattr(core.gc, "fetch_directions", fake_directions)
-    monkeypatch.setattr(
-        core.gc,
-        "places_nearby",
-        lambda location, keyword, place_type, open_now=True: [_place("mooresville", 0.5), _place("greenwood", 0.7), _place("martinsville", 0.3)],
-    )
-
-    places = core._compute_nearby_along_route("A", "B", "Chick-fil-A", "restaurant", 5, 45)["places"]
-
-    assert [p["name"] for p in places] == ["martinsville", "mooresville"]
-    assert [p["minutes_into_drive"] for p in places] == ["25m", "35m"]
-    assert [p["detour_minutes"] for p in places] == ["2m", "5m"]
-
-
 EDT = timezone(timedelta(hours=-4))
 
 # Chick-fil-A-style hours: Mon-Sat 06:30-22:00, closed Sunday.
@@ -131,18 +98,143 @@ def test_is_open_at_handles_overnight_24_7_and_missing_hours():
     assert core._is_open_at({"utc_offset": -240}, datetime(2026, 9, 27, 3, 0, tzinfo=EDT)) is None
 
 
-def test_along_route_with_departure_time_checks_hours_at_arrival(monkeypatch):
+# Sample points for a 45-minute window over STEPS sit at lat = lng = 1.25, 2.0, 2.5.
+NEAR_15M, NEAR_30M, NEAR_45M = 1.25, 2.0, 2.5
+
+
+def _place(place_id, name, at):
+    return {
+        "place_id": place_id,
+        "name": name,
+        "vicinity": f"{place_id} St",
+        "geometry": {"location": {"lat": at, "lng": at}},
+    }
+
+
+def _fake_route(monkeypatch, timings, direct_seconds=3660):
+    """timings: place lat -> (seconds origin->stop, seconds stop->destination)."""
+
     def fake_directions(origin, destination, departure_time, waypoints=None):
         if not waypoints:
-            return {"legs": [{"duration": {"value": 3660}, "steps": STEPS}]}
-        return {"legs": [{"duration": {"value": 25 * 60}}, {"duration": {"value": 38 * 60}}]}
+            return {"legs": [{"duration": {"value": direct_seconds}, "steps": STEPS}]}
+        to_stop, from_stop = timings[float(waypoints[0].split(",")[0])]
+        return {"legs": [{"duration": {"value": to_stop}}, {"duration": {"value": from_stop}}]}
 
-    seen_open_now = []
+    monkeypatch.setattr(core.gc, "fetch_directions", fake_directions)
 
+
+def _fake_places(monkeypatch, by_brand, calls=None):
     def fake_nearby(location, keyword, place_type, open_now=True):
-        seen_open_now.append(open_now)
-        return [_place("cfa", 0.3), _place("closed-early", 0.31), _place("no-hours", 0.32)]
+        if calls is not None:
+            calls.append((keyword, place_type, open_now))
+        return by_brand.get(keyword, [])
 
+    monkeypatch.setattr(core.gc, "places_nearby", fake_nearby)
+
+
+def test_default_food_search_covers_all_brands_ranked_by_detour(monkeypatch):
+    _fake_route(
+        monkeypatch,
+        {
+            NEAR_15M: (16 * 60, 63 * 60),  # CFA across town: 16m in, 18m detour
+            NEAR_30M: (26 * 60, 41 * 60),  # Dunkin' on the way: 26m in, 6m detour
+        },
+    )
+    calls = []
+    _fake_places(
+        monkeypatch,
+        {
+            "Chick-fil-A": [_place("cfa", "Chick-fil-A", NEAR_15M)],
+            "Dunkin'": [_place("dunkin", "Dunkin'", NEAR_30M)],
+        },
+        calls,
+    )
+
+    result = core.compute_nearby_places.__wrapped__(
+        "food", "A", "B", within_first_minutes=45
+    )
+
+    assert {keyword for keyword, _, _ in calls} == set(core.DEFAULT_FOOD_BRANDS)
+    assert all(place_type is None for _, place_type, _ in calls)  # brand search, no type filter
+    assert [(p["brand"], p["detour_minutes"], p["minutes_into_drive"]) for p in result["places"]] == [
+        ("Dunkin'", "6m", "26m"),
+        ("Chick-fil-A", "18m", "16m"),
+    ]
+    assert result["summary"] == (
+        "Dunkin' (dunkin St) adds the least time: 6m. Also: Chick-fil-A (cfa St) adds 18m (+12m)."
+    )
+
+
+def test_along_route_drops_far_off_route_wrong_brand_over_cap_and_past_window(monkeypatch):
+    _fake_route(
+        monkeypatch,
+        {
+            NEAR_15M: (15 * 60, 67 * 60),  # 21m detour: over the 20m cap
+            NEAR_45M: (47 * 60, 16 * 60),  # past the 45m window
+            NEAR_30M: (25 * 60, 38 * 60),  # 2m detour: kept
+        },
+    )
+    _fake_places(
+        monkeypatch,
+        {
+            "QuikTrip": [
+                _place("terre-haute", "QuikTrip", 9.0),  # returned by Google, far from the route
+                _place("too-far", "QuikTrip Store #1", NEAR_15M),
+                _place("late", "QuikTrip", NEAR_45M),
+                _place("ok", "QuikTrip Store #2", NEAR_30M),
+            ],
+            "Dunkin'": [_place("pizza", "Hunt Brothers Pizza", NEAR_30M)],
+        },
+    )
+
+    places = core._compute_nearby_along_route(
+        "A", "B", ["QuikTrip", "Dunkin'"], "restaurant", 5, 45
+    )["places"]
+
+    assert [p["place_id"] for p in places] == ["ok"]
+    assert places[0]["detour_minutes"] == "2m"
+
+
+def test_equal_detours_fall_back_to_brand_preference(monkeypatch):
+    _fake_route(monkeypatch, {NEAR_30M: (25 * 60, 38 * 60), NEAR_45M: (35 * 60, 28 * 60 + 20)})
+    _fake_places(
+        monkeypatch,
+        {
+            "Dunkin'": [_place("dunkin", "Dunkin'", NEAR_30M)],
+            "Chick-fil-A": [_place("cfa", "Chick-fil-A", NEAR_45M)],
+        },
+    )
+
+    places = core._compute_nearby_along_route(
+        "A", "B", ["Chick-fil-A", "Dunkin'"], "restaurant", 5, 45
+    )["places"]
+
+    # 2m vs 2m20s: same whole minute, so the preferred brand wins.
+    assert [p["brand"] for p in places] == ["Chick-fil-A", "Dunkin'"]
+
+
+def test_resolve_brands():
+    assert core._resolve_brands("food", None, None) == list(core.DEFAULT_FOOD_BRANDS)
+    assert core._resolve_brands("food", "Chipotle", None) == ["Chipotle"]
+    assert core._resolve_brands("food", None, ["Wawa"]) == ["Wawa"]
+    assert core._resolve_brands("food", None, []) == [None]
+    assert core._resolve_brands("gas", None, None) == [None]
+
+
+def test_along_route_with_departure_time_checks_hours_at_arrival(monkeypatch):
+    _fake_route(monkeypatch, {NEAR_15M: (25 * 60, 38 * 60), NEAR_30M: (26 * 60, 38 * 60), NEAR_45M: (27 * 60, 38 * 60)})
+    calls = []
+    _fake_places(
+        monkeypatch,
+        {
+            "Chick-fil-A": [
+                _place("cfa", "Chick-fil-A", NEAR_15M),
+                _place("closed-early", "Chick-fil-A", NEAR_30M),
+                _place("no-hours", "Chick-fil-A", NEAR_45M),
+            ]
+        },
+        calls,
+    )
     hours = {
         "cfa": CFA_HOURS,
         "closed-early": {"utc_offset": -240, "opening_hours": {"periods": [
@@ -150,16 +242,14 @@ def test_along_route_with_departure_time_checks_hours_at_arrival(monkeypatch):
         ]}},
         "no-hours": {},
     }
-    monkeypatch.setattr(core.gc, "fetch_directions", fake_directions)
-    monkeypatch.setattr(core.gc, "places_nearby", fake_nearby)
     monkeypatch.setattr(core.gc, "place_hours", lambda place_id: hours[place_id])
 
     places = core._compute_nearby_along_route(
-        "A", "B", "Chick-fil-A", "restaurant", 5, 45, "2026-09-28T06:30:00-04:00"
+        "A", "B", ["Chick-fil-A"], "restaurant", 5, 45, "2026-09-28T06:30:00-04:00"
     )["places"]
 
-    assert not any(seen_open_now)  # don't let Places filter on the current time
-    assert [p["name"] for p in places] == ["cfa", "no-hours"]
+    assert not any(open_now for _, _, open_now in calls)  # don't let Places filter on the current time
+    assert [p["place_id"] for p in places] == ["cfa", "no-hours"]
     assert places[0]["arrival_time"] == "2026-09-28T06:55-04:00"
     assert places[0]["open_at_arrival"] is True
     assert places[1]["open_at_arrival"] is None
