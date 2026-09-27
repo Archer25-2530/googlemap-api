@@ -2,7 +2,7 @@
 concerns so it can be unit tested and reused by scripts/validate_routes.py.
 """
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import googlemaps.convert
 
@@ -99,25 +99,30 @@ def compute_places(
     keyword: str,
     place_type: str = "restaurant",
     max_results: int = 3,
+    departure_time: str = "now",
 ) -> dict:
-    departure = gc.resolve_departure_time("now")
+    departure = gc.resolve_departure_time(departure_time)
+    scheduled = _is_scheduled(departure_time)
     route = gc.fetch_directions(origin, destination, departure_time=departure)
     direct_seconds = route["legs"][0]["duration"]["value"]
     start_location = route["legs"][0]["start_location"]
-    raw_places = gc.places_nearby(start_location, keyword, place_type)
+    raw_places = gc.places_nearby(start_location, keyword, place_type, open_now=not scheduled)
 
-    places = []
-    for place in raw_places[:max_results]:
-        _, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
-        places.append(
-            {
-                "name": place["name"],
-                "address": place.get("vicinity"),
-                "rating": place.get("rating"),
-                "open_now": place.get("opening_hours", {}).get("open_now"),
-                "detour_minutes": format_duration(detour_seconds),
-                "place_id": place["place_id"],
-            }
+    candidates = []
+    for place in raw_places[: max_results * 3 if scheduled else max_results]:
+        to_stop, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
+        candidates.append(
+            (
+                place,
+                to_stop,
+                {
+                    "name": place["name"],
+                    "address": place.get("vicinity"),
+                    "rating": place.get("rating"),
+                    "detour_minutes": format_duration(detour_seconds),
+                    "place_id": place["place_id"],
+                },
+            )
         )
 
     return {
@@ -125,13 +130,82 @@ def compute_places(
         "destination": destination,
         "keyword": keyword,
         "type": place_type,
-        "places": places,
+        "places": _keep_open(candidates, departure, scheduled, max_results),
     }
 
 
 _NEARBY_KIND_TO_TYPE = {"food": "restaurant", "gas": "gas_station"}
 NEARBY_MAX_RESULTS_CAP = 8
 _ROUTE_SAMPLE_POINTS = 3
+_MINUTES_PER_WEEK = 7 * 24 * 60
+
+
+def _is_scheduled(departure_time: str | None) -> bool:
+    """True when the caller asked about a planned departure rather than now."""
+    return departure_time is not None and departure_time.strip().lower() != "now"
+
+
+def _minute_of_week(day: int, hhmm: str) -> int:
+    """Google's (day, "HHMM") with Sunday = 0, as minutes since Sunday 00:00."""
+    return day * 24 * 60 + int(hhmm[:2]) * 60 + int(hhmm[2:])
+
+
+def _is_open_at(details: dict, when: datetime) -> bool | None:
+    """Whether a place is open at `when`, from its Place Details hours.
+
+    Prefers current_opening_hours (the next 7 days, including holiday
+    changes) over the regular weekly schedule. Returns None when Google has
+    no hours for the place.
+    """
+    hours = details.get("current_opening_hours") or details.get("opening_hours") or {}
+    periods = hours.get("periods")
+    if not periods or "utc_offset" not in details:
+        return None
+
+    local = when.astimezone(timezone(timedelta(minutes=details["utc_offset"])))
+    now_minute = _minute_of_week((local.weekday() + 1) % 7, local.strftime("%H%M"))
+    for period in periods:
+        if "close" not in period:  # Google's encoding for open 24/7
+            return True
+        opens = _minute_of_week(period["open"]["day"], period["open"]["time"])
+        closes = _minute_of_week(period["close"]["day"], period["close"]["time"])
+        if closes <= opens:  # wraps past Saturday night
+            closes += _MINUTES_PER_WEEK
+        for minute in (now_minute, now_minute + _MINUTES_PER_WEEK):
+            if opens <= minute < closes:
+                return True
+    return False
+
+
+def _keep_open(
+    candidates: list[tuple[dict, int, dict]],
+    departure: datetime,
+    scheduled: bool,
+    limit: int,
+) -> list[dict]:
+    """Take (raw place, seconds to reach it, result dict) candidates in rank
+    order and return up to `limit` results that will be open on arrival.
+
+    For "now" searches Places already filtered to open places, so this just
+    reports open_now. For a planned departure it checks each place's hours at
+    its arrival time, looking up Place Details only until `limit` are found.
+    Places with no published hours are kept with open_at_arrival = None.
+    """
+    results = []
+    for place, seconds_to_place, result in candidates:
+        if len(results) >= limit:
+            break
+        if not scheduled:
+            result["open_now"] = place.get("opening_hours", {}).get("open_now")
+        else:
+            arrival = departure + timedelta(seconds=seconds_to_place)
+            open_at_arrival = _is_open_at(gc.place_hours(place["place_id"]), arrival)
+            if open_at_arrival is False:
+                continue
+            result["arrival_time"] = arrival.isoformat(timespec="minutes")
+            result["open_at_arrival"] = open_at_arrival
+        results.append(result)
+    return results
 
 
 def _stop_timing(
@@ -216,6 +290,7 @@ def compute_nearby_places(
     keyword: str | None = None,
     max_results: int = 5,
     within_first_minutes: int | None = None,
+    departure_time: str = "now",
 ) -> dict:
     if kind not in _NEARBY_KIND_TO_TYPE:
         raise ValueError("kind must be 'food' or 'gas'")
@@ -226,24 +301,27 @@ def compute_nearby_places(
 
     if within_first_minutes:
         return _compute_nearby_along_route(
-            origin, destination, keyword, place_type, limit, within_first_minutes
+            origin, destination, keyword, place_type, limit, within_first_minutes, departure_time
         )
 
     if destination:
-        result = compute_places(origin, destination, keyword, place_type, max_results=limit)
+        result = compute_places(
+            origin, destination, keyword, place_type, max_results=limit, departure_time=departure_time
+        )
         return {"places": result["places"]}
 
-    departure = gc.resolve_departure_time("now")
+    departure = gc.resolve_departure_time(departure_time)
+    scheduled = _is_scheduled(departure_time)
     origin_result = gc.validate_address(origin)
     origin_location = origin_result.get("geocode", {}).get("location", {})
     start_location = {
         "lat": origin_location.get("latitude"),
         "lng": origin_location.get("longitude"),
     }
-    raw_places = gc.places_nearby(start_location, keyword, place_type)
+    raw_places = gc.places_nearby(start_location, keyword, place_type, open_now=not scheduled)
 
     scored = []
-    for place in raw_places[:limit]:
+    for place in raw_places[: limit * 3 if scheduled else limit]:
         place_location = place["geometry"]["location"]
         leg = gc.fetch_directions(
             origin,
@@ -253,18 +331,19 @@ def compute_nearby_places(
         scored.append(
             (
                 leg["distance"]["value"],
+                place,
+                leg["duration"]["value"],
                 {
                     "name": place["name"],
                     "address": place.get("vicinity"),
                     "rating": place.get("rating"),
-                    "open_now": place.get("opening_hours", {}).get("open_now"),
                     "place_id": place["place_id"],
                 },
             )
         )
     scored.sort(key=lambda item: item[0])
 
-    return {"places": [place for _, place in scored]}
+    return {"places": _keep_open([item[1:] for item in scored], departure, scheduled, limit)}
 
 
 def _compute_nearby_along_route(
@@ -274,12 +353,14 @@ def _compute_nearby_along_route(
     place_type: str,
     limit: int,
     within_first_minutes: int,
+    departure_time: str = "now",
 ) -> dict:
     """Search near points sampled along the route, truncated to the first
     within_first_minutes of driving, so results are actually on the way
     rather than just near the origin or ranked by detour off the full route.
     """
-    departure = gc.resolve_departure_time("now")
+    departure = gc.resolve_departure_time(departure_time)
+    scheduled = _is_scheduled(departure_time)
     route = gc.fetch_directions(origin, destination, departure_time=departure)
     leg = route["legs"][0]
     direct_seconds = leg["duration"]["value"]
@@ -288,7 +369,9 @@ def _compute_nearby_along_route(
     seen_place_ids = set()
     candidates = []
     for sample in sample_points:
-        for place in gc.places_nearby(sample["location"], keyword, place_type):
+        for place in gc.places_nearby(
+            sample["location"], keyword, place_type, open_now=not scheduled
+        ):
             if place["place_id"] in seen_place_ids:
                 continue
             seen_place_ids.add(place["place_id"])
@@ -303,11 +386,12 @@ def _compute_nearby_along_route(
         scored.append(
             (
                 (detour_seconds, to_stop),
+                place,
+                to_stop,
                 {
                     "name": place["name"],
                     "address": place.get("vicinity"),
                     "rating": place.get("rating"),
-                    "open_now": place.get("opening_hours", {}).get("open_now"),
                     "detour_minutes": format_duration(detour_seconds),
                     "minutes_into_drive": format_duration(to_stop),
                     "place_id": place["place_id"],
@@ -316,7 +400,7 @@ def _compute_nearby_along_route(
         )
     scored.sort(key=lambda item: item[0])
 
-    return {"places": [place for _, place in scored[:limit]]}
+    return {"places": _keep_open([item[1:] for item in scored], departure, scheduled, limit)}
 
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)

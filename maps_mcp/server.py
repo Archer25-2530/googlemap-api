@@ -65,6 +65,7 @@ def get_nearby_places(
     keyword: str | None = None,
     max_results: int = 5,
     within_first_minutes: int | None = None,
+    departure_time: str = "now",
 ) -> dict:
     """Find nearby food or gas stops, optionally ranked by detour off a route.
 
@@ -79,8 +80,14 @@ def get_nearby_places(
         within_first_minutes: Optional; requires destination. Only returns stops reached
             within this many minutes of driving from origin, e.g. 60 for a breakfast stop
             on a longer trip. detour_minutes is the time the stop adds over the direct route.
+        departure_time: "now" (default) returns places open right now, with open_now.
+            An ISO 8601 timestamp for a planned departure (e.g. "2026-09-28T06:00:00-04:00")
+            instead returns places open when you'd arrive at them, with arrival_time and
+            open_at_arrival (null if Google has no hours for the place).
     """
-    return compute_nearby_places(kind, origin, destination, keyword, max_results, within_first_minutes)
+    return compute_nearby_places(
+        kind, origin, destination, keyword, max_results, within_first_minutes, departure_time
+    )
 
 
 @mcp.tool
