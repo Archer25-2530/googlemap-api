@@ -321,31 +321,50 @@ def _meters_between(a: dict, b: dict) -> float:
 
 
 def _search_brands(
-    points: list[dict], brands: list[str | None], place_type: str, open_now: bool
-) -> list[tuple[float, str | None, dict]]:
-    """Search every brand near every point and return unique
-    (meters from nearest search point, brand, place) candidates, nearest
-    first, so the capped set of detour lookups goes to the likeliest stops.
+    points: list[dict],
+    brands: list[str | None],
+    place_type: str,
+    open_now: bool,
+    max_candidates: int,
+) -> list[tuple[str | None, dict]]:
+    """Search every brand near every point and return up to max_candidates
+    unique (brand, place) candidates worth a detour lookup.
+
+    Each place is assigned to its nearest search point, and the slots are
+    shared out round-robin across points, nearest first at each. Otherwise
+    one crowded stretch (a dozen Indianapolis QuikTrips near the last point,
+    all past the time window) can fill every slot and starve an on-the-way
+    stop near an earlier point.
 
     Google often returns places outside the requested radius. Those aren't
     dropped here: some are good stops a few miles off the highway, and the
     detour cap is what rules out the wrong-direction ones (a Terre Haute
     QuikTrip for a Bloomington -> Indianapolis route).
     """
-    candidates = {}
+    found = {}
     for brand in brands:
         for point in points:
             # The brand name is filter enough; a type would drop brands Google
             # files elsewhere (QuikTrip as a gas station, Dunkin' as a cafe).
             search_type = place_type if brand is None else None
             for place in gc.places_nearby(point, brand, search_type, open_now=open_now):
-                if not _matches_brand(place, brand):
-                    continue
-                meters = _meters_between(point, place["geometry"]["location"])
-                known = candidates.get(place["place_id"])
-                if known is None or meters < known[0]:
-                    candidates[place["place_id"]] = (meters, known[1] if known else brand, place)
-    return sorted(candidates.values(), key=lambda item: item[0])
+                if _matches_brand(place, brand):
+                    found.setdefault(place["place_id"], (brand, place))
+
+    per_point = [[] for _ in points]
+    for brand, place in found.values():
+        distances = [_meters_between(point, place["geometry"]["location"]) for point in points]
+        nearest = min(range(len(points)), key=distances.__getitem__)
+        per_point[nearest].append((distances[nearest], brand, place))
+    for group in per_point:
+        group.sort(key=lambda item: item[0])
+
+    selected = []
+    for rank in range(max(map(len, per_point), default=0)):
+        for group in per_point:
+            if rank < len(group) and len(selected) < max_candidates:
+                selected.append(group[rank][1:])
+    return selected
 
 
 def _place_result(place: dict, brand: str | None) -> dict:
@@ -392,10 +411,12 @@ def compute_nearby_places(
         "lat": origin_location.get("latitude"),
         "lng": origin_location.get("longitude"),
     }
-    candidates = _search_brands([start_location], search_brands, place_type, open_now=not scheduled)
+    candidates = _search_brands(
+        [start_location], search_brands, place_type, open_now=not scheduled, max_candidates=limit * 3
+    )
 
     scored = []
-    for _, brand, place in candidates[: limit * 3]:
+    for brand, place in candidates:
         place_location = place["geometry"]["location"]
         leg = gc.fetch_directions(
             origin,
@@ -432,13 +453,17 @@ def _compute_nearby_along_route(
     sample_points = _sample_points_along_route(leg["steps"], window_minutes)
 
     candidates = _search_brands(
-        [sample["location"] for sample in sample_points], brands, place_type, open_now=not scheduled
+        [sample["location"] for sample in sample_points],
+        brands,
+        place_type,
+        open_now=not scheduled,
+        max_candidates=limit * 3,
     )
 
     window_seconds = window_minutes * 60
     brand_rank = {brand: i for i, brand in enumerate(brands)}
     scored = []
-    for _, brand, place in candidates[: limit * 3]:
+    for brand, place in candidates:
         to_stop, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
         if to_stop > window_seconds or detour_seconds > MAX_DETOUR_SECONDS:
             continue

@@ -255,3 +255,25 @@ def test_along_route_with_departure_time_checks_hours_at_arrival(monkeypatch):
     assert places[0]["open_at_arrival"] is True
     assert places[1]["open_at_arrival"] is None
     assert "open_now" not in places[0]
+
+
+def test_crowded_last_point_cannot_starve_an_on_the_way_stop(monkeypatch):
+    # Live failure: with a planned departure Google returns every QuikTrip in
+    # south Indianapolis near the 45m point. They were all nearer their point
+    # than the Martinsville Dunkin' was to its own, took all 15 detour-lookup
+    # slots, were all past the window, and the result came back empty.
+    quiktrips = [_place(f"qt{i}", "QuikTrip", NEAR_45M + i * 0.0002) for i in range(15)]
+    timings = {q["geometry"]["location"]["lat"]: (50 * 60, 12 * 60) for q in quiktrips}
+    timings[NEAR_30M + 0.01] = (26 * 60, 41 * 60)  # Dunkin' ~1 km off the 30m point
+    _fake_route(monkeypatch, timings)
+    _fake_places(
+        monkeypatch,
+        {"QuikTrip": quiktrips, "Dunkin'": [_place("dunkin", "Dunkin'", NEAR_30M + 0.01)]},
+    )
+
+    places = core._compute_nearby_along_route(
+        "A", "B", ["QuikTrip", "Dunkin'"], "restaurant", 5, 45
+    )["places"]
+
+    assert [p["place_id"] for p in places] == ["dunkin"]
+    assert places[0]["detour_minutes"] == "6m"
