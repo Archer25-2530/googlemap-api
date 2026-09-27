@@ -88,8 +88,8 @@ def validate_address(address: str) -> dict:
 
 def places_nearby(
     location: dict,
-    keyword: str,
-    place_type: str,
+    keyword: str | None,
+    place_type: str | None,
     radius: int = 5000,
     open_now: bool = True,
 ) -> list[dict]:

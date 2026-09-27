@@ -282,6 +282,85 @@ def _sample_points_along_route(steps: list[dict], within_minutes: int) -> list[d
     return points
 
 
+# Drew's go-to breakfast/food stops. get_nearby_places(kind="food") searches
+# all of these by default, so the answer is "which of my brands is close by
+# or on the way", not "any restaurant Google ranks highly".
+DEFAULT_FOOD_BRANDS = ("Chick-fil-A", "Wawa", "QuikTrip", "Dunkin'")
+_SEARCH_RADIUS_METERS = 5000
+# Past this a stop isn't worth suggesting. Generous on purpose: Drew will
+# sometimes take the Chick-fil-A across town (~18m) anyway.
+MAX_DETOUR_SECONDS = 20 * 60
+
+
+def _resolve_brands(kind: str, keyword: str | None, brands: list[str] | None) -> list[str | None]:
+    """The brands to search, in preference order. [None] means any place of
+    the kind, with no brand filter."""
+    if keyword:
+        return [keyword]
+    if brands is not None:
+        return list(brands) or [None]
+    if kind == "food":
+        return list(DEFAULT_FOOD_BRANDS)
+    return [None]
+
+
+def _normalize_name(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _matches_brand(place: dict, brand: str | None) -> bool:
+    """Places keyword search is fuzzy (a Dunkin' search can return a pizza
+    place), so require the brand in the place's name."""
+    return brand is None or _normalize_name(brand) in _normalize_name(place.get("name", ""))
+
+
+def _meters_between(a: dict, b: dict) -> float:
+    """Great-circle distance between two {"lat", "lng"} points."""
+    lat1, lng1, lat2, lng2 = map(math.radians, (a["lat"], a["lng"], b["lat"], b["lng"]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lng2 - lng1) / 2) ** 2
+    return 2 * 6_371_000 * math.asin(math.sqrt(h))
+
+
+def _search_brands(
+    points: list[dict], brands: list[str | None], place_type: str, open_now: bool
+) -> list[tuple[float, str | None, dict]]:
+    """Search every brand near every point and return unique
+    (meters from search point, brand, place) candidates, nearest first.
+
+    Google can return places well outside the requested radius (a Terre
+    Haute QuikTrip for a point near Martinsville), so those are dropped.
+    """
+    seen_place_ids = set()
+    candidates = []
+    for brand in brands:
+        for point in points:
+            # The brand name is filter enough; a type would drop brands Google
+            # files elsewhere (QuikTrip as a gas station, Dunkin' as a cafe).
+            search_type = place_type if brand is None else None
+            for place in gc.places_nearby(point, brand, search_type, open_now=open_now):
+                if place["place_id"] in seen_place_ids or not _matches_brand(place, brand):
+                    continue
+                meters = _meters_between(point, place["geometry"]["location"])
+                if meters > _SEARCH_RADIUS_METERS:
+                    continue
+                seen_place_ids.add(place["place_id"])
+                candidates.append((meters, brand, place))
+    candidates.sort(key=lambda item: item[0])
+    return candidates
+
+
+def _place_result(place: dict, brand: str | None) -> dict:
+    result = {
+        "name": place["name"],
+        "address": place.get("vicinity"),
+        "rating": place.get("rating"),
+        "place_id": place["place_id"],
+    }
+    if brand:
+        result["brand"] = brand
+    return result
+
+
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
 def compute_nearby_places(
     kind: str,
@@ -291,6 +370,7 @@ def compute_nearby_places(
     max_results: int = 5,
     within_first_minutes: int | None = None,
     departure_time: str = "now",
+    brands: list[str] | None = None,
 ) -> dict:
     if kind not in _NEARBY_KIND_TO_TYPE:
         raise ValueError("kind must be 'food' or 'gas'")
@@ -298,17 +378,12 @@ def compute_nearby_places(
         raise ValueError("within_first_minutes requires destination")
     place_type = _NEARBY_KIND_TO_TYPE[kind]
     limit = max(1, min(max_results, NEARBY_MAX_RESULTS_CAP))
-
-    if within_first_minutes:
-        return _compute_nearby_along_route(
-            origin, destination, keyword, place_type, limit, within_first_minutes, departure_time
-        )
+    search_brands = _resolve_brands(kind, keyword, brands)
 
     if destination:
-        result = compute_places(
-            origin, destination, keyword, place_type, max_results=limit, departure_time=departure_time
+        return _compute_nearby_along_route(
+            origin, destination, search_brands, place_type, limit, within_first_minutes, departure_time
         )
-        return {"places": result["places"]}
 
     departure = gc.resolve_departure_time(departure_time)
     scheduled = _is_scheduled(departure_time)
@@ -318,29 +393,19 @@ def compute_nearby_places(
         "lat": origin_location.get("latitude"),
         "lng": origin_location.get("longitude"),
     }
-    raw_places = gc.places_nearby(start_location, keyword, place_type, open_now=not scheduled)
+    candidates = _search_brands([start_location], search_brands, place_type, open_now=not scheduled)
 
     scored = []
-    for place in raw_places[: limit * 3 if scheduled else limit]:
+    for _, brand, place in candidates[: limit * 3]:
         place_location = place["geometry"]["location"]
         leg = gc.fetch_directions(
             origin,
             f"{place_location['lat']},{place_location['lng']}",
             departure_time=departure,
         )["legs"][0]
-        scored.append(
-            (
-                leg["distance"]["value"],
-                place,
-                leg["duration"]["value"],
-                {
-                    "name": place["name"],
-                    "address": place.get("vicinity"),
-                    "rating": place.get("rating"),
-                    "place_id": place["place_id"],
-                },
-            )
-        )
+        result = _place_result(place, brand)
+        result["drive_minutes"] = format_duration(leg["duration"]["value"])
+        scored.append((leg["duration"]["value"], place, leg["duration"]["value"], result))
     scored.sort(key=lambda item: item[0])
 
     return {"places": _keep_open([item[1:] for item in scored], departure, scheduled, limit)}
@@ -349,58 +414,66 @@ def compute_nearby_places(
 def _compute_nearby_along_route(
     origin: str,
     destination: str,
-    keyword: str | None,
+    brands: list[str | None],
     place_type: str,
     limit: int,
-    within_first_minutes: int,
+    within_first_minutes: int | None,
     departure_time: str = "now",
 ) -> dict:
-    """Search near points sampled along the route, truncated to the first
-    within_first_minutes of driving, so results are actually on the way
-    rather than just near the origin or ranked by detour off the full route.
+    """Search near points sampled along the route (the first
+    within_first_minutes of it, or all of it) and rank stops by how much
+    time they add, so the answer is what's actually on the way.
     """
     departure = gc.resolve_departure_time(departure_time)
     scheduled = _is_scheduled(departure_time)
     route = gc.fetch_directions(origin, destination, departure_time=departure)
     leg = route["legs"][0]
     direct_seconds = leg["duration"]["value"]
-    sample_points = _sample_points_along_route(leg["steps"], within_first_minutes)
+    window_minutes = within_first_minutes or math.ceil(direct_seconds / 60)
+    sample_points = _sample_points_along_route(leg["steps"], window_minutes)
 
-    seen_place_ids = set()
-    candidates = []
-    for sample in sample_points:
-        for place in gc.places_nearby(
-            sample["location"], keyword, place_type, open_now=not scheduled
-        ):
-            if place["place_id"] in seen_place_ids:
-                continue
-            seen_place_ids.add(place["place_id"])
-            candidates.append(place)
+    candidates = _search_brands(
+        [sample["location"] for sample in sample_points], brands, place_type, open_now=not scheduled
+    )
 
-    window_seconds = within_first_minutes * 60
+    window_seconds = window_minutes * 60
+    brand_rank = {brand: i for i, brand in enumerate(brands)}
     scored = []
-    for place in candidates[: limit * 3]:
+    for _, brand, place in candidates[: limit * 3]:
         to_stop, detour_seconds = _stop_timing(origin, destination, place, departure, direct_seconds)
-        if to_stop > window_seconds:
+        if to_stop > window_seconds or detour_seconds > MAX_DETOUR_SECONDS:
             continue
-        scored.append(
-            (
-                (detour_seconds, to_stop),
-                place,
-                to_stop,
-                {
-                    "name": place["name"],
-                    "address": place.get("vicinity"),
-                    "rating": place.get("rating"),
-                    "detour_minutes": format_duration(detour_seconds),
-                    "minutes_into_drive": format_duration(to_stop),
-                    "place_id": place["place_id"],
-                },
-            )
-        )
+        result = _place_result(place, brand)
+        result["detour_minutes"] = format_duration(detour_seconds)
+        result["minutes_into_drive"] = format_duration(to_stop)
+        # Whole minutes so a 10-second difference doesn't outrank brand preference.
+        scored.append(((detour_seconds // 60, brand_rank[brand], to_stop), place, to_stop, result))
     scored.sort(key=lambda item: item[0])
 
-    return {"places": _keep_open([item[1:] for item in scored], departure, scheduled, limit)}
+    places = _keep_open([item[1:] for item in scored], departure, scheduled, limit)
+    detours = {item[3]["place_id"]: item[0][0] for item in scored}
+    return {"summary": _summarize(places, detours), "places": places}
+
+
+def _summarize(places: list[dict], detour_minutes: dict[str, int]) -> str:
+    """One line stating the tradeoff: the stop that adds the least time,
+    then how much more each alternative costs on top of it."""
+    if not places:
+        return "No matching stop on the way."
+
+    def label(place):
+        return f"{place.get('brand') or place['name']} ({place['address']})"
+
+    best = places[0]
+    best_minutes = detour_minutes[best["place_id"]]
+    line = f"{label(best)} adds the least time: {best['detour_minutes']}."
+    others = [
+        f"{label(p)} adds {p['detour_minutes']} (+{detour_minutes[p['place_id']] - best_minutes}m)"
+        for p in places[1:]
+    ]
+    if others:
+        line += " Also: " + "; ".join(others) + "."
+    return line
 
 
 @ttl_cache(ttl_seconds=CACHE_TTL_SECONDS)
