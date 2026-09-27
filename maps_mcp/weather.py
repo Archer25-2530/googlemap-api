@@ -22,6 +22,9 @@ from . import google_client as gc
 GOOGLE_WEATHER_DAYS_URL = "https://weather.googleapis.com/v1/forecast/days:lookup"
 GOOGLE_WEATHER_HOURS_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+# Free, keyless, not Google: used only for hourly_at on forecast days beyond
+# Google's 24-hour hourly page, so it costs nothing against the Google budget.
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 MAX_FORECAST_DAYS = 10  # Google Weather's forecast window
 # Google returns at most 24 hourly entries per page, and we never follow
@@ -220,6 +223,52 @@ def _extract_hour_temp(
     return round(degrees) if degrees is not None else None
 
 
+def _fetch_open_meteo_hour_temps(
+    lat: float, lng: float, dates: list[str], hourly_at: str, timezone_name: str | None
+) -> dict[str, int]:
+    """One Open-Meteo forecast request covering every date in `dates`;
+    returns {date: temp_f at hourly_at local time}. Failures return {} (the
+    daily Google numbers still stand) rather than failing the whole call.
+    """
+    hour, minute = (int(part) for part in hourly_at.split(":"))
+    try:
+        response = requests.get(
+            OPEN_METEO_FORECAST_URL,
+            params={
+                "latitude": lat,
+                "longitude": lng,
+                "hourly": "temperature_2m",
+                "temperature_unit": "fahrenheit",
+                "timezone": timezone_name or "auto",
+                "start_date": min(dates),
+                "end_date": max(dates),
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        print(f"open-meteo hourly request failed: {exc}", file=sys.stderr)
+        return {}
+    if not response.ok:
+        print(f"open-meteo hourly request failed: {response.status_code}", file=sys.stderr)
+        return {}
+
+    hourly = response.json().get("hourly", {})
+    temps_by_time = dict(zip(hourly.get("time", []), hourly.get("temperature_2m", [])))
+
+    results = {}
+    for d in dates:
+        # Open-Meteo is hourly; round HH:MM to the nearest hour on that date.
+        target = dt.datetime.fromisoformat(d).replace(hour=hour, minute=minute)
+        if minute >= 30 and hour < 23:
+            target = target.replace(minute=0) + dt.timedelta(hours=1)
+        else:
+            target = target.replace(minute=0)
+        temp = temps_by_time.get(target.strftime("%Y-%m-%dT%H:%M"))
+        if temp is not None:
+            results[d] = round(temp)
+    return results
+
+
 def _fetch_typical_days(lat: float, lng: float, dates: list[str]) -> dict[str, dict]:
     """One Open-Meteo Archive request (not Google) covering the last
     TYPICAL_YEARS years; average same-calendar-date values across years for
@@ -337,12 +386,18 @@ def compute_weather(
         hour, minute = (int(part) for part in hourly_at.split(":"))
 
         hourly_dates = []
+        later_dates = []
         for d in google_dates:
-            if d not in days_by_date:
+            if d not in days_by_date or days_by_date[d].get("source") != "forecast":
                 continue
             target_dt = dt.datetime.fromisoformat(d).replace(hour=hour, minute=minute, tzinfo=tz)
-            if target_dt.astimezone(dt.timezone.utc) <= cutoff:
+            target_utc = target_dt.astimezone(dt.timezone.utc)
+            if target_utc < now:
+                continue
+            if target_utc <= cutoff:
                 hourly_dates.append(d)
+            else:
+                later_dates.append(d)
 
         if hourly_dates:
             last_date = max(hourly_dates)
@@ -358,6 +413,15 @@ def compute_weather(
                 temp = _extract_hour_temp(hourly_response, d, hourly_at, timezone_name)
                 if temp is not None:
                     days_by_date[d]["temp_at_hour_f"] = temp
+                    days_by_date[d]["temp_at_hour_source"] = "google"
+
+        # Days 2-10: Google's hourly page can't reach them without extra paid
+        # pages, so use one free Open-Meteo call for all of them.
+        if later_dates:
+            om_temps = _fetch_open_meteo_hour_temps(lat, lng, later_dates, hourly_at, timezone_name)
+            for d, temp in om_temps.items():
+                days_by_date[d]["temp_at_hour_f"] = temp
+                days_by_date[d]["temp_at_hour_source"] = "open-meteo"
 
     days = [days_by_date[d] for d in all_dates if d in days_by_date]
 

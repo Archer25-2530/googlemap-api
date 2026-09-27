@@ -117,8 +117,9 @@ def get_weather(
         location: Free-text address/city, or "lat,lng".
         start_date: First day to forecast, "YYYY-MM-DD" local to the location.
         end_date: Last day to forecast, "YYYY-MM-DD" (default: start_date). Max 21-day span.
-        hourly_at: Optional "HH:MM" local time; adds temp_at_hour_f when that time is
-            within the next 24 hours, e.g. a site's morning start time.
+        hourly_at: Optional "HH:MM" local time, e.g. a site's morning start time;
+            adds temp_at_hour_f to each forecast day (Google for the next 24 hours,
+            Open-Meteo for later forecast days; see temp_at_hour_source).
     """
     try:
         return compute_weather(location, start_date, end_date, hourly_at)
