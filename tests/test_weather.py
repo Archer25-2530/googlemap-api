@@ -64,6 +64,21 @@ def test_extract_hour_temp_picks_closest_interval():
     assert temp == 60
 
 
+def test_extract_hour_temp_returns_none_when_hour_is_past_the_page():
+    # Google caps a page at 24 hours; the last entry here is 21:00 local on
+    # 09-27, and the caller wants 09:00 on 09-28. Nearest-entry used to
+    # return the 21:00 reading as if it were the 09:00 one.
+    hourly_response = {
+        "forecastHours": [
+            {"interval": {"startTime": "2026-09-28T00:00:00Z"}, "temperature": {"degrees": 61}},
+        ]
+    }
+    temp = weather._extract_hour_temp(
+        hourly_response, "2026-09-28", "09:00", "America/Indiana/Indianapolis"
+    )
+    assert temp is None
+
+
 def test_resolve_location_parses_lat_lng_without_geocoding(monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("should not geocode a lat,lng location")

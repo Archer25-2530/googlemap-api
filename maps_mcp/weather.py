@@ -24,7 +24,11 @@ GOOGLE_WEATHER_HOURS_URL = "https://weather.googleapis.com/v1/forecast/hours:loo
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 MAX_FORECAST_DAYS = 10  # Google Weather's forecast window
-MAX_HOURLY_HOURS = 240  # 10 days, in hours
+# Google returns at most 24 hourly entries per page, and we never follow
+# nextPageToken (call budget), so only the next 24 hours are reachable.
+MAX_HOURLY_HOURS = 24
+# How close an hourly entry's start must be to the requested time to count.
+HOURLY_MATCH_TOLERANCE_SECONDS = 30 * 60
 MAX_SPAN_DAYS = 21
 TYPICAL_YEARS = 10
 MIN_PRECIP_INCHES = 0.04
@@ -208,7 +212,9 @@ def _extract_hour_temp(
             best_diff = diff
             best = entry
 
-    if best is None:
+    # The nearest entry isn't good enough: when the target is past the end of
+    # the page, it's just the page's last hour, reported as the wrong time.
+    if best is None or best_diff > HOURLY_MATCH_TOLERANCE_SECONDS:
         return None
     degrees = best.get("temperature", {}).get("degrees")
     return round(degrees) if degrees is not None else None
