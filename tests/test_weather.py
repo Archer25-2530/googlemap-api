@@ -164,6 +164,91 @@ def test_google_weather_request_does_not_retry_on_4xx(monkeypatch):
     assert calls["count"] == 1
 
 
+def test_compute_weather_falls_back_to_typical_when_google_omits_a_date(monkeypatch):
+    # Google's forecast window is anchored to local time, so it can legitimately
+    # return fewer days than our UTC-based cutoff assumed. That date must still
+    # show up, backed by typical data, not silently disappear.
+    today = weather._today_utc()
+    d0 = today.isoformat()
+    d1 = (today + dt.timedelta(days=1)).isoformat()
+
+    def fake_daily(lat, lng):
+        return {
+            "timeZone": {"id": "America/Indiana/Indianapolis"},
+            "forecastDays": [
+                {
+                    "displayDate": {"year": today.year, "month": today.month, "day": today.day},
+                    "maxTemperature": {"degrees": 70},
+                    "minTemperature": {"degrees": 50},
+                    "daytimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                    "nighttimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                }
+                # d1 deliberately missing, unlike what the date-arithmetic cutoff assumed
+            ],
+        }
+
+    def fake_typical(lat, lng, dates):
+        return {d: {"date": d, "high_f": 65, "low_f": 45, "precip_chance_pct": 5, "snow_in": 0.0,
+                     "summary": "typical", "source": "typical"} for d in dates}
+
+    def fail_resolve(location):
+        return 39.17, -86.53, location
+
+    monkeypatch.setattr(weather, "_fetch_daily_forecast", fake_daily)
+    monkeypatch.setattr(weather, "_fetch_typical_days", fake_typical)
+    monkeypatch.setattr(weather, "_resolve_location", fail_resolve)
+
+    result = weather.compute_weather("Indianapolis, IN", d0, d1)
+    by_date = {day["date"]: day for day in result["days"]}
+    assert d0 in by_date and by_date[d0]["source"] == "forecast"
+    assert d1 in by_date and by_date[d1]["source"] == "typical"
+
+
+def test_compute_weather_requests_enough_hours_to_include_exact_boundary(monkeypatch):
+    # Regression for the Indianapolis "9:00 reads like the overnight low" bug:
+    # when now and the target hour are an exact integer number of hours apart,
+    # ceil() alone under-requests by one bucket, so the target hour's own
+    # forecastHours entry never gets fetched and a nearer (colder) hour wins.
+    today = weather._today_utc()
+    d0 = today.isoformat()
+    fixed_now = dt.datetime.combine(today, dt.time(5, 0), tzinfo=dt.timezone.utc)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(weather.dt, "datetime", FixedDateTime)
+
+    def fake_daily(lat, lng):
+        return {
+            "timeZone": {"id": "UTC"},
+            "forecastDays": [
+                {
+                    "displayDate": {"year": today.year, "month": today.month, "day": today.day},
+                    "maxTemperature": {"degrees": 70},
+                    "minTemperature": {"degrees": 46},
+                    "daytimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                    "nighttimeForecast": {"precipitation": {"probability": {"percent": 10}}},
+                }
+            ],
+        }
+
+    captured = {}
+
+    def fake_hourly(lat, lng, hours):
+        captured["hours"] = hours
+        return {"forecastHours": []}
+
+    monkeypatch.setattr(weather, "_fetch_daily_forecast", fake_daily)
+    monkeypatch.setattr(weather, "_fetch_hourly_forecast", fake_hourly)
+    monkeypatch.setattr(weather, "_resolve_location", lambda location: (39.17, -86.53, location))
+
+    # target is exactly 4 hours after fixed_now (5:00 -> 9:00 UTC)
+    weather.compute_weather("Indianapolis, IN", d0, hourly_at="09:00")
+    assert captured["hours"] >= 5
+
+
 def test_google_weather_request_maps_403_to_api_not_enabled(monkeypatch):
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test-key")
 
