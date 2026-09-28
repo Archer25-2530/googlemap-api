@@ -277,3 +277,45 @@ def test_crowded_last_point_cannot_starve_an_on_the_way_stop(monkeypatch):
 
     assert [p["place_id"] for p in places] == ["dunkin"]
     assert places[0]["detour_minutes"] == "6m"
+
+
+def test_origin_only_search_drops_places_beyond_25_miles(monkeypatch):
+    # Origin geocodes to (39.16, -86.53) - Bloomington, IN.
+    monkeypatch.setattr(
+        core.gc,
+        "validate_address",
+        lambda address: {"geocode": {"location": {"latitude": 39.16, "longitude": -86.53}}},
+    )
+    near = {"place_id": "near", "name": "Chick-fil-A", "vicinity": "near St",
+            "geometry": {"location": {"lat": 39.17, "lng": -86.50}}}   # ~2 mi
+    ohio = {"place_id": "ohio", "name": "Chick-fil-A Resource Center", "vicinity": "ohio St",
+            "geometry": {"location": {"lat": 39.33, "lng": -84.41}}}   # ~115 mi
+    _fake_places(monkeypatch, {"Chick-fil-A": [near, ohio]})
+    directions = []
+
+    def fake_directions(origin, destination, departure_time, waypoints=None):
+        directions.append(destination)
+        return {"legs": [{"duration": {"value": 7 * 60}}]}
+
+    monkeypatch.setattr(core.gc, "fetch_directions", fake_directions)
+
+    result = core.compute_nearby_places.__wrapped__("food", "Bloomington, IN", keyword="Chick-fil-A")
+
+    assert [p["place_id"] for p in result["places"]] == ["near"]
+    assert len(directions) == 1  # no Directions call spent on the Ohio result
+
+
+def test_origin_only_search_with_nothing_in_range_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        core.gc,
+        "validate_address",
+        lambda address: {"geocode": {"location": {"latitude": 39.16, "longitude": -86.53}}},
+    )
+    ohio = {"place_id": "ohio", "name": "Chick-fil-A", "vicinity": "ohio St",
+            "geometry": {"location": {"lat": 39.33, "lng": -84.41}}}
+    _fake_places(monkeypatch, {"Chick-fil-A": [ohio]})
+    monkeypatch.setattr(core.gc, "fetch_directions", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+
+    result = core.compute_nearby_places.__wrapped__("food", "Bloomington, IN", keyword="Chick-fil-A")
+
+    assert result == {"summary": "No matching stop within 25 miles.", "places": []}

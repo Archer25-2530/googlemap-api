@@ -289,6 +289,11 @@ DEFAULT_FOOD_BRANDS = ("Chick-fil-A", "Wawa", "QuikTrip", "Dunkin'")
 # Past this a stop isn't worth suggesting. Generous on purpose: Drew will
 # sometimes take the Chick-fil-A across town (~18m) anyway.
 MAX_DETOUR_SECONDS = 20 * 60
+# Origin-only searches (no destination) have no detour to rule out far-away
+# results, and Google Places often returns matches well outside the requested
+# radius (a Chick-fil-A in Ohio for "near Bloomington"). Anything farther than
+# this straight-line distance is dropped before any Directions call is made.
+MAX_ORIGIN_ONLY_METERS = 40_234  # 25 miles
 
 
 def _resolve_brands(kind: str, keyword: str | None, brands: list[str] | None) -> list[str | None]:
@@ -414,6 +419,13 @@ def compute_nearby_places(
     candidates = _search_brands(
         [start_location], search_brands, place_type, open_now=not scheduled, max_candidates=limit * 3
     )
+    candidates = [
+        (brand, place)
+        for brand, place in candidates
+        if _meters_between(start_location, place["geometry"]["location"]) <= MAX_ORIGIN_ONLY_METERS
+    ]
+    if not candidates:
+        return {"summary": "No matching stop within 25 miles.", "places": []}
 
     scored = []
     for brand, place in candidates:

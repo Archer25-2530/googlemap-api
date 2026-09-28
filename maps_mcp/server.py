@@ -79,7 +79,8 @@ def get_nearby_places(
     Args:
         kind: "food" or "gas".
         origin: Address or "lat,lng" to start from.
-        destination: Optional address. If given, searches along the route.
+        destination: Optional address. If given, searches along the route. Without it,
+            only stops within 25 miles (straight line) of origin are returned.
         keyword: Optional single brand, e.g. "Chick-fil-A"; overrides brands.
         max_results: Number of results to return (default 5, max 8).
         within_first_minutes: Optional; requires destination. Only returns stops reached
