@@ -197,6 +197,56 @@ async def api_places(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+def _int_param(request: Request, name: str, default: int | None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)  # ValueError -> 400 in the caller
+
+
+@mcp.custom_route("/api/nearby-places", methods=["GET"])
+async def api_nearby_places(request: Request) -> JSONResponse:
+    """Same as the get_nearby_places tool, for GET-only clients (Home Assistant
+    rest_command). brands is a comma-separated list; "none" means no brand filter.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    params = request.query_params
+    kind = params.get("kind")
+    origin = params.get("origin")
+    if not kind or not origin:
+        return JSONResponse(
+            {"error": "kind and origin query params are required"}, status_code=400
+        )
+
+    brands_param = params.get("brands")
+    if brands_param is None:
+        brands = None
+    elif brands_param.strip().lower() == "none":
+        brands = []
+    else:
+        brands = [b.strip() for b in brands_param.split(",") if b.strip()]
+
+    try:
+        result = compute_nearby_places(
+            kind,
+            origin,
+            params.get("destination") or None,
+            params.get("keyword") or None,
+            _int_param(request, "max_results", 5),
+            _int_param(request, "within_first_minutes", None),
+            params.get("departure_time", "now"),
+            brands,
+        )
+    except MapsClientError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/api/distance-matrix", methods=["GET"])
 async def api_distance_matrix(request: Request) -> JSONResponse:
     if not _authorized(request):
