@@ -59,8 +59,11 @@ API rate limits.
 ## GET endpoints (no MCP)
 
 For clients that can't speak MCP (tinyNature executors, Home Assistant
-`rest_command`). Every route needs `?key=<TINYNATURE_API_KEY>`; a missing or
-wrong key returns 401.
+`rest_command`). Each consumer has its own key: `TINYNATURE_API_KEY` for
+tinyNature, `HA_MAPS_KEY` for Home Assistant. Send it in the `X-API-Key` header
+(preferred, keeps it out of URLs and logs) or as `?key=` (legacy). A missing or
+wrong key returns 401; an unset key env var turns that consumer off. Each
+authorized call logs the route and consumer name.
 
 | Route | Same as | Params |
 |---|---|---|

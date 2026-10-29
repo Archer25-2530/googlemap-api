@@ -1,5 +1,6 @@
 """MCP tool definitions for maps-mcp."""
 import hmac
+import logging
 import os
 
 from starlette.requests import Request
@@ -17,16 +18,39 @@ from .google_client import MapsClientError
 from .mcp_app import mcp
 from .weather import WeatherError, compute_weather
 
+logger = logging.getLogger(__name__)
+
+
+# One key per GET consumer, so one can be revoked without breaking the other
+# and the log shows who called. None of these is GOOGLE_MAPS_API_KEY, so a
+# leaked key never exposes the real (billable) Google key.
+_CONSUMER_KEY_ENV = {
+    "tinynature": "TINYNATURE_API_KEY",
+    "home-assistant": "HA_MAPS_KEY",
+}
+
+
+def _caller(request: Request) -> str | None:
+    """Return the consumer name whose key the request carries, else None.
+
+    The key may come in the X-API-Key header (preferred: stays out of URLs and
+    logs) or the ?key= query param (kept for existing callers). Every
+    configured key is compared in constant time.
+    """
+    provided = request.headers.get("x-api-key") or request.query_params.get("key", "")
+    match = None
+    for consumer, env_name in _CONSUMER_KEY_ENV.items():
+        expected = os.environ.get(env_name, "")
+        if expected and hmac.compare_digest(provided, expected):
+            match = consumer
+    return match
+
 
 def _authorized(request: Request) -> bool:
-    """Constant-time check of the shared TINYNATURE_API_KEY query param.
-
-    Dedicated secret, unrelated to GOOGLE_MAPS_API_KEY, so a leaked
-    query-string key never exposes the real (billable) Google key.
-    """
-    expected_key = os.environ.get("TINYNATURE_API_KEY", "")
-    provided_key = request.query_params.get("key", "")
-    return bool(expected_key) and hmac.compare_digest(provided_key, expected_key)
+    consumer = _caller(request)
+    if consumer:
+        logger.info("%s %s by %s", request.method, request.url.path, consumer)
+    return consumer is not None
 
 
 @mcp.tool
