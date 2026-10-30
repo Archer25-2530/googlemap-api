@@ -1,5 +1,6 @@
 """MCP tool definitions for maps-mcp."""
 import hmac
+import logging
 import os
 
 from starlette.requests import Request
@@ -17,16 +18,39 @@ from .google_client import MapsClientError
 from .mcp_app import mcp
 from .weather import WeatherError, compute_weather
 
+logger = logging.getLogger(__name__)
+
+
+# One key per GET consumer, so one can be revoked without breaking the other
+# and the log shows who called. None of these is GOOGLE_MAPS_API_KEY, so a
+# leaked key never exposes the real (billable) Google key.
+_CONSUMER_KEY_ENV = {
+    "tinynature": "TINYNATURE_API_KEY",
+    "home-assistant": "HA_MAPS_KEY",
+}
+
+
+def _caller(request: Request) -> str | None:
+    """Return the consumer name whose key the request carries, else None.
+
+    The key may come in the X-API-Key header (preferred: stays out of URLs and
+    logs) or the ?key= query param (kept for existing callers). Every
+    configured key is compared in constant time.
+    """
+    provided = request.headers.get("x-api-key") or request.query_params.get("key", "")
+    match = None
+    for consumer, env_name in _CONSUMER_KEY_ENV.items():
+        expected = os.environ.get(env_name, "")
+        if expected and hmac.compare_digest(provided, expected):
+            match = consumer
+    return match
+
 
 def _authorized(request: Request) -> bool:
-    """Constant-time check of the shared TINYNATURE_API_KEY query param.
-
-    Dedicated secret, unrelated to GOOGLE_MAPS_API_KEY, so a leaked
-    query-string key never exposes the real (billable) Google key.
-    """
-    expected_key = os.environ.get("TINYNATURE_API_KEY", "")
-    provided_key = request.query_params.get("key", "")
-    return bool(expected_key) and hmac.compare_digest(provided_key, expected_key)
+    consumer = _caller(request)
+    if consumer:
+        logger.info("%s %s by %s", request.method, request.url.path, consumer)
+    return consumer is not None
 
 
 @mcp.tool
@@ -193,6 +217,56 @@ async def api_places(request: Request) -> JSONResponse:
         result = compute_places(origin, destination, keyword, place_type)
     except MapsClientError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
+
+    return JSONResponse(result)
+
+
+def _int_param(request: Request, name: str, default: int | None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)  # ValueError -> 400 in the caller
+
+
+@mcp.custom_route("/api/nearby-places", methods=["GET"])
+async def api_nearby_places(request: Request) -> JSONResponse:
+    """Same as the get_nearby_places tool, for GET-only clients (Home Assistant
+    rest_command). brands is a comma-separated list; "none" means no brand filter.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    params = request.query_params
+    kind = params.get("kind")
+    origin = params.get("origin")
+    if not kind or not origin:
+        return JSONResponse(
+            {"error": "kind and origin query params are required"}, status_code=400
+        )
+
+    brands_param = params.get("brands")
+    if brands_param is None:
+        brands = None
+    elif brands_param.strip().lower() == "none":
+        brands = []
+    else:
+        brands = [b.strip() for b in brands_param.split(",") if b.strip()]
+
+    try:
+        result = compute_nearby_places(
+            kind,
+            origin,
+            params.get("destination") or None,
+            params.get("keyword") or None,
+            _int_param(request, "max_results", 5),
+            _int_param(request, "within_first_minutes", None),
+            params.get("departure_time", "now"),
+            brands,
+        )
+    except MapsClientError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     return JSONResponse(result)
 

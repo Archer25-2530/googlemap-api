@@ -56,6 +56,26 @@ lunch -> second site.
 for 5 minutes (per address/waypoint combination) to stay well under Directions
 API rate limits.
 
+## GET endpoints (no MCP)
+
+For clients that can't speak MCP (tinyNature executors, Home Assistant
+`rest_command`). Each consumer has its own key: `TINYNATURE_API_KEY` for
+tinyNature, `HA_MAPS_KEY` for Home Assistant. Send it in the `X-API-Key` header
+(preferred, keeps it out of URLs and logs) or as `?key=` (legacy). A missing or
+wrong key returns 401; an unset key env var turns that consumer off. Each
+authorized call logs the route and consumer name.
+
+| Route | Same as | Params |
+|---|---|---|
+| `/api/drive-time` | `get_drive_time` | `origin`, `destination`, `departure_time` |
+| `/api/nearby-places` | `get_nearby_places` | `kind`, `origin`, `destination`, `keyword`, `max_results`, `within_first_minutes`, `departure_time`, `brands` (comma-separated; `none` = no brand filter) |
+| `/api/geocode` | — | `address` |
+| `/api/places` | — (older brand search, no open-at-arrival) | `origin`, `destination`, `keyword`, `type` |
+| `/api/distance-matrix` | — | `origins`, `destinations` (`|`-separated) |
+
+Errors: 400 for bad params, 502 when Google fails. Each call costs the same
+Google quota as the matching MCP tool.
+
 ## Environment variables
 
 | Variable              | Required | Default | Notes                                      |
